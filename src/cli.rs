@@ -11,7 +11,11 @@ type SyncHeadphones = fn(&ConfigFile) -> Result<()>;
 type ReadBattery = fn(&ConfigFile) -> Result<u8>;
 
 #[derive(Parser, Debug)]
-#[command(name = "bose", version, about = "Bose CLI")]
+#[command(
+    name = "bose",
+    version,
+    about = "Control supported Bose headphones from your terminal"
+)]
 pub struct Args {
     #[arg(
         long,

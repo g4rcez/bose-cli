@@ -8,6 +8,38 @@ Ultra Headphones (2nd Gen)**, also seen on macOS as `Bose QC Ultra 2 HP`. The CL
 can detect other known Bose models, but it refuses mode/noise/immersive/EQ writes
 unless the selected model has an implemented profile.
 
+## Quick start
+
+Install the published CLI:
+
+```sh
+cargo install bose-cli
+```
+
+The installed binary is named `bose`:
+
+```sh
+bose doctor
+bose devices --select
+bose status
+bose tui
+```
+
+If you are running from a checkout instead:
+
+```sh
+cargo run -- doctor
+```
+
+Use `bose doctor` first. It checks the config path, `fzf` availability, and
+Bluetooth adapter status.
+
+## Project status
+
+This is an early, macOS-first CLI. It is careful about writes: unsupported or
+unknown models can be discovered and selected, but configuration writes are
+rejected until a model profile has been implemented and hardware-verified.
+
 ## Context
 
 The project started as a small CLI/TUI replacement for common Bose app actions:
@@ -61,7 +93,8 @@ Why:
 - The project uses an `IOBluetooth` Objective-C bridge in `src/macos_rfcomm.m`
   to open the model profile’s RFCOMM channel and exchange BMAP packets.
 
-Bluetooth discovery can still use `btleplug`, but syncing settings requires themacOS RFCOMM bridge today.
+Bluetooth discovery can still use `btleplug`, but syncing settings requires the
+macOS RFCOMM bridge today.
 
 ## Requirements
 
@@ -71,7 +104,25 @@ Bluetooth discovery can still use `btleplug`, but syncing settings requires them
 - the Bose headset paired with macOS
 - optional: `fzf` for `bose devices --select`
 
-## Build and compile
+## Installation and build
+
+Install from crates.io:
+
+```sh
+cargo install bose-cli
+```
+
+Upgrade an existing install:
+
+```sh
+cargo install bose-cli --force
+```
+
+After install, the binary is named:
+
+```sh
+bose
+```
 
 Run checks:
 
@@ -103,12 +154,6 @@ Install locally from this checkout:
 
 ```sh
 cargo install --path .
-```
-
-After install, the binary is named:
-
-```sh
-bose
 ```
 
 ## Configuration
@@ -212,9 +257,17 @@ bose status
 bose sync
 ```
 
-This pushes the saved mode/noise/immersive/EQ state to the selected headset ifits model supports the current configuration profile.
+This pushes the saved mode/noise/immersive/EQ state to the selected headset if
+its model supports the current configuration profile.
 
-When a supported selected headset is available, setting changes use a best-efforttransaction: the CLI snapshots the previous desired config in memory, saves therequested change, and attempts headset sync. If sync fails, it restores theprevious config on disk and attempts to sync those previous desired settings backto the headset. The headset state can still be unknown if rollback sync alsofails. Without a selected headset, changes are saved locally only. With aselected unsupported or unknown model, the CLI rejects these configurationcommands before saving.
+When a supported selected headset is available, setting changes use a
+best-effort transaction: the CLI snapshots the previous desired config in
+memory, saves the requested change, and attempts headset sync. If sync fails, it
+restores the previous config on disk and attempts to sync those previous desired
+settings back to the headset. The headset state can still be unknown if rollback
+sync also fails. Without a selected headset, changes are saved locally only.
+With a selected unsupported or unknown model, the CLI rejects these
+configuration commands before saving.
 
 ### Modes
 
@@ -321,9 +374,12 @@ Controls:
 - `Esc`/`Backspace`: go back
 - `q` or `Ctrl-C`: quit
 
-The TUI saves changes and syncs supported mode/noise/immersive changes to theselected headset. If sync fails, it rolls the local config and UI controls back tothe previous desired settings and attempts a best-effort headset rollback.
+The TUI saves changes and syncs supported mode/noise/immersive changes to the
+selected headset. If sync fails, it rolls the local config and UI controls back
+to the previous desired settings and attempts a best-effort headset rollback.
 
-While a save/sync action is running, the footer shows a busy status and listscreens replace the selection marker with a spinner.
+While a save/sync action is running, the footer shows a busy status and list
+screens replace the selection marker with a spinner.
 
 ## Development notes
 
@@ -332,7 +388,7 @@ Key files:
 - `src/cli.rs`: command definitions and command handling
 - `src/tui.rs`: Ratatui interface
 - `src/bluetooth.rs`: Bluetooth device discovery/listing
-- `src/bmap.rs`: BMAP packet handling and config sync
+- `src/bmap.rs`: BMAP packet building, response parsing, and transport helpers
 - `src/macos_rfcomm.m`: macOS `IOBluetooth` RFCOMM bridge
 - `PROTOCOL.md`: protocol notes and packet reference
 
@@ -359,6 +415,18 @@ BOSE_BMAP_RAW=1 cargo run -- bmap-raw 1 7 1
 
 Do not expose `bmap-raw` as a normal user command; it can send arbitrary writes.
 
+## Contributing model support
+
+Writable support for a new headset should be added behind a dedicated
+`HeadphoneModel` profile in `src/models/`, with hardware verification before it
+is enabled. Keep unsupported models read-only so QC Ultra 2 packets are never
+sent to unknown hardware.
+
+When adding protocol commands, document the function block, function, operator,
+payload, and expected response in `PROTOCOL.md`.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for PR and bug-report guidance.
+
 ## Troubleshooting
 
 If the headset does not appear:
@@ -375,4 +443,9 @@ If sync fails:
 3. Run `bose status` to verify RFCOMM/BMAP readback.
 4. Run `bose sync` again after reconnecting the headset.
 
-If `devices --select` fails, install `fzf` or select/configure the devicemanually in `config.toml`.
+If `devices --select` fails, install `fzf` or select/configure the device
+manually in `config.toml`.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

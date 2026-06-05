@@ -2,7 +2,15 @@
 name = "bose-cli"
 version = "0.1.0"
 edition = "2021"
-description = "Control your Bose devices through CLI/TUI"
+description = "Control supported Bose headphones from your terminal"
+license = "MIT"
+repository = "https://github.com/g4rcez/bose-cli"
+homepage = "https://github.com/g4rcez/bose-cli"
+documentation = "https://github.com/g4rcez/bose-cli#readme"
+readme = "README.md"
+keywords = ["bose", "bluetooth", "headphones", "cli", "macos"]
+categories = ["command-line-utilities"]
+exclude = ["/AGENTS.md", "/specs/"]
 
 [[bin]]
 name = "bose"
