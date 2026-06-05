@@ -25,13 +25,16 @@ pub fn select_device(devices: &[ScannedDevice]) -> Result<DeviceRef> {
         .enumerate()
         .map(|(index, d)| {
             format!(
-                "{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}",
                 index,
                 d.name
                     .as_deref()
                     .map(sanitize_cell)
                     .unwrap_or_else(|| "<unknown>".into()),
                 d.address,
+                d.model
+                    .map(|model| model.to_string())
+                    .unwrap_or_else(|| "unknown-model".into()),
                 d.rssi
                     .map(|r| r.to_string())
                     .unwrap_or_else(|| "<n/a>".into()),
@@ -45,7 +48,7 @@ pub fn select_device(devices: &[ScannedDevice]) -> Result<DeviceRef> {
         .collect::<Vec<_>>()
         .join("\n");
     let mut child = Command::new("fzf")
-        .args(["--delimiter", "\t", "--with-nth", "2,3,4,5"])
+        .args(["--delimiter", "\t", "--with-nth", "2,3,4,5,6"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -74,6 +77,7 @@ pub fn select_device(devices: &[ScannedDevice]) -> Result<DeviceRef> {
     Ok(DeviceRef {
         name: device.name.clone(),
         address: device.address.clone(),
+        model: device.model,
     })
 }
 

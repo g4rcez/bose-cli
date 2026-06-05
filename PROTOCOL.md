@@ -4,8 +4,8 @@ This document explains the Bose control protocol used by this CLI, how it is
 implemented here, and how to add new Bluetooth configuration writes safely.
 
 The protocol implementation is inspired by the reverse-engineered
-[`aaronsb/bosectl`](https://github.com/aaronsb/bosectl) repository, especially
-its protocol notes and BMAP implementations:
+`aaronsb/bosectl` repository, especially its protocol notes and BMAP
+implementations:
 
 - `NOTES.md`
 - `rust/src/protocol.rs`
@@ -17,8 +17,13 @@ its protocol notes and BMAP implementations:
 
 ## Scope
 
-The current supported headset is **Bose QC Ultra 2 HP** / Bose QuietComfort Ultra
-Headphones 2, product ID `0x4082`, codename `wolverine` in `bosectl`.
+The current writable model profile is **Bose QC Ultra 2 HP** / Bose QuietComfort
+Ultra Headphones 2, product ID `0x4082`, codename `wolverine` in `bosectl`.
+
+The code has a model registry in `src/models/`. Known-but-unsupported models can
+be detected and selected, but the CLI refuses configuration writes unless that
+model implements the `HeadphoneModel` API. This avoids sending QC Ultra 2 BMAP
+packets to unverified hardware.
 
 The CLI currently syncs:
 
@@ -26,7 +31,7 @@ The CLI currently syncs:
 - live noise cancellation / ANC toggle
 - live immersive audio mode
 - EQ: bass, mid, treble
-- battery readback for `status --headphones`
+- battery readback for `status`
 
 Custom mode creation is persisted locally but is not yet written to the headset.
 
@@ -45,13 +50,13 @@ On macOS, CoreBluetooth is BLE-only and cannot open RFCOMM. This repo uses a
 native `IOBluetooth` bridge:
 
 - `build.rs` compiles `src/macos_rfcomm.m` on macOS targets.
-- `src/macos_rfcomm.m` opens `IOBluetoothDevice` by Bluetooth address, opens
-  RFCOMM channel `2`, writes a BMAP packet, waits for complete BMAP frames, and
-  returns bytes to Rust over FFI.
+- `src/macos_rfcomm.m` opens `IOBluetoothDevice` by Bluetooth address, opens the
+  model profile’s RFCOMM channel, writes a BMAP packet, waits for complete BMAP
+  frames, and returns bytes to Rust over FFI.
 - `src/bmap.rs` builds/parses BMAP frames and validates responses.
+- `src/models/qc_ultra_2.rs` contains the verified QC Ultra 2 BMAP addresses,payload encoders, sync sequence, and battery readback.
 
-Do not rely on `/dev/cu.Bose...` serial devices for BMAP. They can exist but are
-not a reliable control path for this headset.
+Do not rely on `/dev/cu.Bose...` serial devices for BMAP. They can exist but arenot a reliable control path for this headset.
 
 ## BMAP frame format
 
@@ -75,21 +80,21 @@ bytes.
 
 ## Operators
 
-| Value | Name       | Meaning |
-|------:|------------|---------|
-| `0`   | `SET`      | write-only; often auth-gated |
-| `1`   | `GET`      | read |
-| `2`   | `SETGET`   | write and return current/updated value |
-| `3`   | `STATUS`   | status response/update |
-| `4`   | `ERROR`    | error response |
-| `5`   | `START`    | action/command trigger |
-| `6`   | `RESULT`   | command result |
-| `7`   | `PROCESSING` | long-running command started |
+| Value | Name | Meaning |
+| --- | --- | --- |
+| `0` | `SET` | write-only; often auth-gated |
+| `1` | `GET` | read |
+| `2` | `SETGET` | write and return current/updated value |
+| `3` | `STATUS` | status response/update |
+| `4` | `ERROR` | error response |
+| `5` | `START` | action/command trigger |
+| `6` | `RESULT` | command result |
+| `7` | `PROCESSING` | long-running command started |
 
 Known error codes:
 
 | Code | Meaning |
-|-----:|---------|
+| --- | --- |
 | `1` | length error |
 | `2` | checksum error |
 | `3` | function block unsupported |
@@ -105,8 +110,7 @@ Known error codes:
 
 ## Authentication boundary
 
-The reference repo found that Bose auth/cloud ECDH gates many `SET` writes, but
-not all useful operations.
+The reference repo found that Bose auth/cloud ECDH gates many `SET` writes, butnot all useful operations.
 
 Unauthenticated operations used by this CLI:
 
@@ -115,15 +119,14 @@ Unauthenticated operations used by this CLI:
 - `SETGET [31.10]` writes live audio settings.
 - `SETGET [1.7]` writes EQ bands.
 
-Avoid implementing plain `SET` writes unless you have verified they are accepted
-without auth. Error `5` usually means the write path is auth-gated.
+Avoid implementing plain `SET` writes unless you have verified they are acceptedwithout auth. Error `5` usually means the write path is auth-gated.
 
 ## QC Ultra 2 function map
 
 Important function block addresses from `aaronsb/bosectl`:
 
 | Address | Name | Current CLI use |
-|---------|------|-----------------|
+| --- | --- | --- |
 | `[0.5]` | firmware version | not yet exposed |
 | `[1.2]` | product/device name | not yet exposed |
 | `[1.3]` | voice prompts/language | not yet exposed |
@@ -134,7 +137,7 @@ Important function block addresses from `aaronsb/bosectl`:
 | `[1.11]` | sidetone | not yet exposed |
 | `[1.24]` | auto pause | not yet exposed |
 | `[1.27]` | auto answer | not yet exposed |
-| `[2.2]` | battery | `status --headphones` |
+| `[2.2]` | battery | `status` |
 | `[4.8]` | pairing mode | not yet exposed |
 | `[4.12]` | routing / active multipoint source | not yet exposed |
 | `[5.1]` | active audio source | not yet exposed |
@@ -147,17 +150,15 @@ Important function block addresses from `aaronsb/bosectl`:
 
 ## Configuration writes implemented in this CLI
 
-The central implementation is `src/bmap.rs::sync_config`.
+The central implementation is `src/models/qc_ultra_2.rs::sync_config`, reachedthrough the model registry wrapper `src/models/mod.rs::sync_selected_config`.`src/bmap.rs` is now generic frame/transport plumbing.
 
-It requires `ConfigFile.selected_device.address`, then sends packets in this
-order:
+It requires `ConfigFile.selected_device.address` and a selected model resolved as`qc-ultra-headphones-2`, then sends packets in this order:
 
 1. mode switch with `START [31.3]`, if `active_mode` is one of the built-ins
 2. live noise/immersive settings with `SETGET [31.10]`
 3. three EQ band writes with `SETGET [1.7]`
 
-Short sleeps are used between commands because the headset can timeout if writes
-are sent back-to-back immediately after a mode switch.
+Short sleeps are used between commands because the headset can timeout if writesare sent back-to-back immediately after a mode switch.
 
 ### Listening mode
 
@@ -170,7 +171,7 @@ Packet:
 Current mode indexes:
 
 | CLI mode | Index | Meaning |
-|----------|------:|---------|
+| --- | --- | --- |
 | `Quiet` | `0` | full ANC |
 | `Aware` | `1` | passthrough/transparency |
 | `Immersion` | `2` | spatial audio immersive/head tracking |
@@ -198,7 +199,7 @@ Payload:
 Fields:
 
 | Byte | Field | Values |
-|-----:|-------|--------|
+| --- | --- | --- |
 | `0` | `cnc` | `0..10`, where `0=max ANC`, `10=most ambient` |
 | `1` | `auto_cnc` | must be `0`; `1` is rejected on reference firmware |
 | `2` | `spatial` | `0=off`, `1=room/still`, `2=head/motion` |
@@ -224,13 +225,12 @@ wind = 0
 Immersive mapping:
 
 | CLI/domain | BMAP spatial |
-|------------|-------------:|
+| --- | --- |
 | `Off` | `0` |
 | `Still` | `1` |
 | `Motion` | `2` |
 
-Example for local config `noise.enabled=true`, `noise.level=0`,
-`immersive=Off`:
+Example for local config `noise.enabled=true`, `noise.level=0`, `immersive=Off`:
 
 ```text
 SETGET [31.10] payload = 0a00000001
@@ -255,7 +255,7 @@ Each band is written separately:
 Band IDs:
 
 | Band | ID |
-|------|---:|
+| --- | --- |
 | Bass | `0` |
 | Mid | `1` |
 | Treble | `2` |
@@ -299,8 +299,7 @@ Rust. Rust then calls `parse_frames` and validates:
 - the response has complete frames
 - at least one frame matches the requested `fblock` and `function`
 - no matching frame is `ERROR`
-- the matching frame operator is expected (`STATUS` or `RESULT` for current
-  sync writes)
+- the matching frame operator is expected (`STATUS` or `RESULT` for currentsync writes)
 
 This avoids treating unrelated async frames or partial RFCOMM chunks as success.
 
@@ -308,7 +307,7 @@ This avoids treating unrelated async frames or partial RFCOMM chunks as success.
 
 ### Selecting the device
 
-`bose devices --select` saves the selected Bluetooth address/name into
+`bose devices --select` saves the selected Bluetooth address/name/model into
 `config.toml`:
 
 ```toml
@@ -333,11 +332,11 @@ or after installing:
 bose sync
 ```
 
-This loads `$HOME/.config/bosecli/config.toml` unless `--config` is passed, then calls `bmap::sync_config`.
+This loads `$HOME/.config/bosecli/config.toml` unless `--config` is passed, thenresolves the selected model and calls its `HeadphoneModel::sync_config` method.Unknown or unsupported selected models are rejected before opening RFCOMM.
 
 ### Automatic sync after CLI changes
 
-These commands save config locally, then attempt headphone sync:
+For supported selected models, these commands save config locally, then attemptheadphone sync:
 
 ```sh
 bose mode set Quiet
@@ -346,18 +345,19 @@ bose immersive set motion
 bose eq set --bass 2 --mid 0 --treble -1
 ```
 
-If sync fails, the config remains saved and the CLI prints a warning.
+If sync fails, the CLI restores the previous desired config and attempts abest-effort headset rollback. If rollback sync fails, the headset state isreported as unknown. With no selected headset, changes are saved locally only;with an unsupported selected model, configuration commands are rejected beforesaving.
 
 ### TUI sync
 
-The TUI also calls the same sync path after saving mode, noise, or immersive
-changes. Tests inject a fake sync hook so unit tests do not touch real hardware.
+The TUI also calls the same sync path after saving mode, noise, or immersivechanges. Tests inject a fake sync hook so unit tests do not touch real hardware.Unsupported selected models cannot enter the configuration screens.
 
 ### Status readback
 
-`bose status` shows local desired state.
+`bose status` shows local desired state and, when the selected model supports it,
+reads battery from the headset with `GET [2.2]`.
 
-`bose status --headphones` also reads battery from the headset with `GET [2.2]`.
+The legacy `--headphones` flag is accepted for compatibility but is no longer
+required.
 
 ### Raw BMAP probe command
 
@@ -381,36 +381,32 @@ Do not expose this as a normal user command. It can send arbitrary writes.
 
 Use this process for new features:
 
-1. **Find the BMAP address and operator** in
-   [`aaronsb/bosectl`](https://github.com/aaronsb/bosectl).
+1. **Add or update a model profile in** `src/models/`**.**
+   - Every writable model must implement `HeadphoneModel`.
+   - Keep unsupported models recognized but non-writable until hardware-verified.
+2. **Find the BMAP address and operator** in `aaronsb/bosectl`.
    - Prefer `GET`, `START`, or verified unauthenticated `SETGET` paths.
    - Avoid plain `SET` unless the reference implementation proves it works.
-
-2. **Define the domain model** in `src/domain.rs` or `src/config.rs`.
+3. **Define the domain model** in `src/domain.rs` or `src/config.rs`.
    - Validate ranges before writing hardware.
    - Keep the local `config.toml` representation human-readable.
-
-3. **Add an encoder in `src/bmap.rs`.**
+4. **Add an encoder in the model profile, not generic** `src/bmap.rs`**.**
    - Convert config values into exact BMAP payload bytes.
    - Add unit tests for edge values and signed-byte casts.
-
-4. **Send with response validation.**
+5. **Send with response validation.**
    - Use the same `send`/`send_expect` pattern.
    - Validate `fblock`, `func`, operator, and `ERROR` frames.
    - Add delays if the headset times out with back-to-back writes.
-
-5. **Wire CLI/TUI after local save.**
+6. **Wire CLI/TUI after local save.**
    - Save config first.
    - Attempt sync second.
-   - If sync fails, keep local config and warn clearly.
-
-6. **Add tests that do not touch hardware.**
+   - If sync fails, restore the previous desired config and attempt rollback.
+7. **Add tests that do not touch hardware.**
    - Test payload construction.
    - Test parser behavior.
    - In TUI tests, inject a fake sync function.
-
-7. **Live-verify with safe reads.**
-   - Use `status --headphones` for battery.
+8. **Live-verify with safe reads.**
+   - Use `status` for battery.
    - Use `BOSE_BMAP_RAW=1 ... bmap-raw <addr> <GET>` for readback.
 
 ## Current limitations
@@ -420,11 +416,11 @@ Use this process for new features:
   implemented here yet.
 - Device name, sidetone, multipoint, auto-pause, auto-answer, pairing, routing,
   and power are not exposed in the CLI yet.
-- `bose status --headphones` only reads battery today; it does not yet reconcile
+- `bose status` only reads battery today; it does not yet reconcile
   all headset state back into local config.
-- Captures in `aaronsb/bosectl` show additional changing fields
-  (`5.7`, `5.13`) during app interactions. The CLI uses the cleaner verified
-  direct write path `[31.10]` for live audio settings.
+- Captures in `aaronsb/bosectl` show additional changing fields (`5.7`, `5.13`)
+  during app interactions. The CLI uses the cleaner verified direct write path
+  `[31.10]` for live audio settings.
 
 ## Quick packet reference
 

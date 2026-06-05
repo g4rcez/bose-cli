@@ -1,4 +1,4 @@
-use crate::{bluetooth::ScannedDevice, bmap, config::ConfigFile, domain, domain::DeviceRef};
+use crate::{bluetooth::ScannedDevice, config::ConfigFile, domain, domain::DeviceRef, models};
 use anyhow::Result;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
@@ -16,6 +16,8 @@ use ratatui::{
 use std::{io, path::PathBuf, time::Duration};
 
 type SyncHeadphones = fn(&ConfigFile) -> Result<()>;
+const SPINNER_FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
+const SPINNER_MARKERS: [&str; 4] = ["⠋ ", "⠙ ", "⠹ ", "⠸ "];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen {
@@ -36,6 +38,12 @@ struct TuiDevice {
     scanned: bool,
 }
 
+#[derive(Debug, Clone)]
+struct LoadingState {
+    message: String,
+    frame: usize,
+}
+
 impl TuiDevice {
     fn saved(reference: DeviceRef) -> Self {
         Self {
@@ -52,6 +60,7 @@ impl TuiDevice {
             reference: DeviceRef {
                 address: device.address,
                 name: device.name,
+                model: device.model,
             },
             rssi: device.rssi,
             connected: Some(device.connected),
@@ -61,11 +70,32 @@ impl TuiDevice {
     }
 
     fn merge_scan(&mut self, device: ScannedDevice) {
-        self.reference.name = self.reference.name.clone().or(device.name);
-        self.rssi = device.rssi;
-        self.connected = Some(device.connected);
+        let ScannedDevice {
+            name,
+            model,
+            rssi,
+            connected,
+            ..
+        } = device;
+
+        if name.is_some() && (self.reference.name.is_none() || connected) {
+            self.reference.name = name;
+        }
+        if model.is_some() && (self.reference.model.is_none() || connected) {
+            self.reference.model = model;
+        }
+        self.rssi = rssi;
+        self.connected = Some(connected);
         self.scanned = true;
     }
+}
+
+fn device_key(address: &str) -> String {
+    address
+        .chars()
+        .filter(|ch| !matches!(ch, ':' | '-' | ' '))
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
 }
 
 fn accent_style() -> Style {
@@ -113,7 +143,17 @@ fn header_line(screen: Screen) -> Line<'static> {
     ])
 }
 
-fn status_line(message: &str, saved: bool) -> Line<'static> {
+fn status_line(message: &str, saved: bool, loading: Option<(&str, &str)>) -> Line<'static> {
+    if let Some((symbol, loading_message)) = loading {
+        return Line::from(vec![
+            Span::styled("busy", dim_style()),
+            Span::raw("  "),
+            Span::styled(symbol.to_owned(), accent_style()),
+            Span::raw(" "),
+            Span::raw(loading_message.to_owned()),
+        ]);
+    }
+
     Line::from(vec![
         Span::styled(if saved { "saved" } else { "status" }, dim_style()),
         Span::raw("  "),
@@ -131,6 +171,19 @@ fn device_item(device: &TuiDevice) -> ListItem<'static> {
     if device.saved {
         meta.push("saved".into());
     }
+    let model_label = device
+        .reference
+        .model
+        .or_else(|| {
+            device
+                .reference
+                .name
+                .as_deref()
+                .and_then(models::infer_model_from_name)
+        })
+        .map(|model| model.to_string())
+        .unwrap_or_else(|| "unknown-model".into());
+    meta.push(model_label);
     if device.scanned {
         meta.push("scanned".into());
     }
@@ -195,6 +248,8 @@ pub struct App {
     noise_enabled: bool,
     scan_status: String,
     sync_headphones: SyncHeadphones,
+    loading: Option<LoadingState>,
+    spinner_frame: usize,
 }
 
 impl App {
@@ -209,7 +264,7 @@ impl App {
             path,
             scanned_devices,
             scan_status,
-            bmap::sync_config,
+            models::sync_selected_config,
         )
     }
 
@@ -229,7 +284,7 @@ impl App {
         for device in scanned_devices {
             if let Some(existing) = devices
                 .iter_mut()
-                .find(|known| known.reference.address == device.address)
+                .find(|known| device_key(&known.reference.address) == device_key(&device.address))
             {
                 existing.merge_scan(device);
             } else {
@@ -257,7 +312,61 @@ impl App {
             message: scan_status.clone(),
             saved: false,
             scan_status,
+            loading: None,
+            spinner_frame: 0,
         }
+    }
+
+    fn loading_message_for_key(&self, key: &KeyEvent) -> Option<&'static str> {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return None;
+        }
+
+        match (self.screen, key.code) {
+            (Screen::Devices, KeyCode::Enter) if !self.devices.is_empty() => {
+                Some("saving selected device")
+            }
+            (Screen::Modes, KeyCode::Enter) => Some("applying mode to headphones"),
+            (Screen::Immersive, KeyCode::Enter) => Some("applying immersive audio"),
+            (Screen::Noise, KeyCode::Char(' ')) => Some("applying noise control"),
+            (
+                Screen::Noise,
+                KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Char('-')
+                | KeyCode::Char('+')
+                | KeyCode::Char('='),
+            ) => Some("applying noise control"),
+            _ => None,
+        }
+    }
+
+    fn begin_loading(&mut self, message: impl Into<String>) {
+        let frame = self.spinner_frame;
+        self.spinner_frame = self.spinner_frame.wrapping_add(1);
+        self.loading = Some(LoadingState {
+            message: message.into(),
+            frame,
+        });
+    }
+
+    fn clear_loading(&mut self) {
+        self.loading = None;
+    }
+
+    fn loading_indicator(&self) -> Option<(&'static str, &str)> {
+        self.loading.as_ref().map(|loading| {
+            (
+                SPINNER_FRAMES[loading.frame % SPINNER_FRAMES.len()],
+                loading.message.as_str(),
+            )
+        })
+    }
+
+    fn loading_marker(&self) -> Option<&'static str> {
+        self.loading
+            .as_ref()
+            .map(|loading| SPINNER_MARKERS[loading.frame % SPINNER_MARKERS.len()])
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> bool {
@@ -331,6 +440,14 @@ impl App {
                 }
             }
             Screen::Actions => {
+                if matches!(self.selected, 0..=2) {
+                    if let Err(err) = models::ensure_selected_device_supports_config(&self.config) {
+                        self.saved = false;
+                        self.message = err.to_string();
+                        return;
+                    }
+                }
+
                 self.screen = match self.selected {
                     0 => Screen::Modes,
                     1 => Screen::Noise,
@@ -543,8 +660,18 @@ fn run_terminal<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result
         terminal.draw(|f| render(f, app))?;
         if event::poll(Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press && app.on_key(key) {
-                    break;
+                if key.kind == KeyEventKind::Press {
+                    if let Some(message) = app.loading_message_for_key(&key) {
+                        app.begin_loading(message);
+                        terminal.draw(|f| render(f, app))?;
+                    }
+
+                    let quit = app.on_key(key);
+                    app.clear_loading();
+
+                    if quit {
+                        break;
+                    }
                 }
             }
         }
@@ -681,7 +808,11 @@ fn render(f: &mut Frame, app: &App) {
         }
     }
     f.render_widget(
-        Paragraph::new(status_line(&app.message, app.saved)),
+        Paragraph::new(status_line(
+            &app.message,
+            app.saved,
+            app.loading_indicator(),
+        )),
         chunks[2],
     );
     f.render_widget(
@@ -696,8 +827,9 @@ fn render_list(f: &mut Frame, area: Rect, app: &App, items: Vec<ListItem<'static
         return;
     }
     let len = items.len();
+    let highlight_symbol = app.loading_marker().unwrap_or("> ");
     let list = List::new(items)
-        .highlight_symbol("> ")
+        .highlight_symbol(highlight_symbol)
         .highlight_style(
             Style::default()
                 .fg(Color::Yellow)
@@ -722,12 +854,24 @@ mod tests {
     static MODE_ROLLBACK_SYNC_CALLS: AtomicUsize = AtomicUsize::new(0);
     static NOISE_ROLLBACK_SYNC_CALLS: AtomicUsize = AtomicUsize::new(0);
     static NO_SELECTED_SYNC_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static UNSUPPORTED_SYNC_CALLS: AtomicUsize = AtomicUsize::new(0);
 
     fn config_with_device() -> ConfigFile {
         let mut config = ConfigFile::default();
         config.selected_device = Some(DeviceRef {
             address: "AA:BB".into(),
-            name: Some("Headphones".into()),
+            name: Some("Bose QC Ultra 2 HP".into()),
+            model: Some(domain::ModelId::QcUltraHeadphones2),
+        });
+        config
+    }
+
+    fn config_with_unsupported_device() -> ConfigFile {
+        let mut config = ConfigFile::default();
+        config.selected_device = Some(DeviceRef {
+            address: "AA:BB".into(),
+            name: Some("Bose QuietComfort 45".into()),
+            model: Some(domain::ModelId::QuietComfort45),
         });
         config
     }
@@ -773,6 +917,11 @@ mod tests {
         Ok(())
     }
 
+    fn fake_unsupported_sync(_: &ConfigFile) -> Result<()> {
+        UNSUPPORTED_SYNC_CALLS.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
     fn reset_noise_sync_calls() {
         NOISE_SYNC_CALLS.store(0, Ordering::SeqCst);
     }
@@ -801,6 +950,10 @@ mod tests {
         NO_SELECTED_SYNC_CALLS.store(0, Ordering::SeqCst);
     }
 
+    fn reset_unsupported_sync_calls() {
+        UNSUPPORTED_SYNC_CALLS.store(0, Ordering::SeqCst);
+    }
+
     fn buffer_text(buffer: &Buffer) -> String {
         let mut lines = Vec::new();
         for y in 0..buffer.area.height {
@@ -824,6 +977,7 @@ mod tests {
             vec![ScannedDevice {
                 name: Some("Headphones".into()),
                 address: "AA:BB".into(),
+                model: None,
                 rssi: Some(-42),
                 connected: false,
             }],
@@ -851,6 +1005,7 @@ mod tests {
             vec![ScannedDevice {
                 name: Some("Headphones".into()),
                 address: "AA:BB".into(),
+                model: None,
                 rssi: None,
                 connected: false,
             }],
@@ -862,6 +1017,39 @@ mod tests {
         assert!(matches!(app.screen, Screen::Devices));
         assert!(app.config.selected_device.is_none());
         assert!(app.message.starts_with("Save failed:"));
+    }
+
+    #[test]
+    fn saved_device_merges_scanned_model_by_normalized_address() {
+        let mut config = ConfigFile::default();
+        config.selected_device = Some(DeviceRef {
+            address: "68:F2:1F:0D:FE:42".into(),
+            name: None,
+            model: None,
+        });
+
+        let app = App::new(
+            config,
+            tempfile::tempdir().unwrap().path().join("bose.toml"),
+            vec![ScannedDevice {
+                address: "68-F2-1F-0D-FE-42".into(),
+                name: Some("Bose QC Ultra 2 HP".into()),
+                model: Some(domain::ModelId::QcUltraHeadphones2),
+                rssi: Some(-42),
+                connected: true,
+            }],
+            None,
+        );
+
+        assert_eq!(app.devices.len(), 1);
+        assert_eq!(
+            app.devices[0].reference.name.as_deref(),
+            Some("Bose QC Ultra 2 HP")
+        );
+        assert_eq!(
+            app.devices[0].reference.model,
+            Some(domain::ModelId::QcUltraHeadphones2)
+        );
     }
 
     #[test]
@@ -1041,6 +1229,27 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_model_cannot_open_config_actions() {
+        reset_unsupported_sync_calls();
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new_with_sync(
+            config_with_unsupported_device(),
+            dir.path().join("bose.toml"),
+            vec![],
+            None,
+            fake_unsupported_sync,
+        );
+        app.screen = Screen::Actions;
+        app.selected = 0;
+
+        app.enter();
+
+        assert!(matches!(app.screen, Screen::Actions));
+        assert_eq!(UNSUPPORTED_SYNC_CALLS.load(Ordering::SeqCst), 0);
+        assert!(app.message.contains("does not support"));
+    }
+
+    #[test]
     fn renders_with_test_backend() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -1049,6 +1258,7 @@ mod tests {
         config.selected_device = Some(DeviceRef {
             address: "AA:BB".into(),
             name: Some("Headphones".into()),
+            model: None,
         });
         let app = App::new(
             config,
@@ -1056,6 +1266,7 @@ mod tests {
             vec![ScannedDevice {
                 name: Some("Headphones".into()),
                 address: "AA:BB".into(),
+                model: None,
                 rssi: Some(-42),
                 connected: true,
             }],
@@ -1071,5 +1282,29 @@ mod tests {
         assert!(!rendered.contains('┌'));
         assert!(!rendered.contains('│'));
         assert!(!rendered.contains('─'));
+    }
+
+    #[test]
+    fn renders_loading_footer_and_spinner_marker() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            config_with_device(),
+            dir.path().join("bose.toml"),
+            vec![],
+            None,
+        );
+        app.screen = Screen::Modes;
+        app.begin_loading("applying mode to headphones");
+
+        terminal.draw(|f| render(f, &app)).unwrap();
+        let rendered = buffer_text(terminal.backend_mut().buffer());
+
+        assert!(rendered.contains("busy"));
+        assert!(rendered.contains("applying mode to headphones"));
+        assert!(rendered.contains(SPINNER_FRAMES[0]));
+        assert!(rendered.contains(&format!("{}Quiet", SPINNER_MARKERS[0])));
+        assert!(!rendered.contains("> Quiet"));
     }
 }

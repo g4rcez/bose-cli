@@ -1,13 +1,14 @@
 use crate::{
     bluetooth, bmap,
     config::{self, ConfigFile},
-    domain, fzf, tui,
+    domain, fzf, models, tui,
 };
 use anyhow::{Context, Result};
 use clap::{ArgAction, Args as ClapArgs, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 type SyncHeadphones = fn(&ConfigFile) -> Result<()>;
+type ReadBattery = fn(&ConfigFile) -> Result<u8>;
 
 #[derive(Parser, Debug)]
 #[command(name = "bose", version, about = "Bose CLI")]
@@ -74,7 +75,7 @@ pub struct DevicesArgs {
 
 #[derive(ClapArgs, Debug)]
 pub struct StatusArgs {
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub headphones: bool,
 }
 
@@ -193,9 +194,12 @@ pub async fn run(args: Args) -> Result<()> {
             } else {
                 for d in &devices {
                     println!(
-                        "{}\t{}\t{}\t{}",
+                        "{}\t{}\t{}\t{}\t{}",
                         d.name.as_deref().unwrap_or("<unknown>"),
                         d.address,
+                        d.model
+                            .map(|model| model.to_string())
+                            .unwrap_or_else(|| "unknown-model".into()),
                         d.rssi
                             .map(|v| v.to_string())
                             .unwrap_or_else(|| "<n/a>".into()),
@@ -226,6 +230,15 @@ pub async fn run(args: Args) -> Result<()> {
                     .unwrap_or_else(|| "<none>".into())
             );
             println!(
+                "selected model: {}",
+                config
+                    .selected_device
+                    .as_ref()
+                    .and_then(models::resolve_device_model)
+                    .map(|model| model.to_string())
+                    .unwrap_or_else(|| "<unknown>".into())
+            );
+            println!(
                 "active mode: {}",
                 config.active_mode.as_deref().unwrap_or("<none>")
             );
@@ -238,16 +251,15 @@ pub async fn run(args: Args) -> Result<()> {
                 "eq: bass={} mid={} treble={}",
                 config.eq.bass, config.eq.mid, config.eq.treble
             );
-            if status_args.headphones {
-                match bmap::read_battery(&config) {
-                    Ok(level) => println!("battery: {level}%"),
-                    Err(err) => eprintln!("warning: failed to read battery from headphones: {err}"),
-                }
-            }
+            print_status_battery(
+                &config,
+                models::read_selected_battery,
+                status_args.headphones,
+            );
         }
         Command::Sync => {
             let config = ConfigFile::load_or_default(&config_path)?;
-            bmap::sync_config(&config)?;
+            models::sync_selected_config(&config)?;
             println!("synced config to headphones");
         }
         Command::BmapRaw {
@@ -265,8 +277,10 @@ pub async fn run(args: Args) -> Result<()> {
                 .map(parse_hex)
                 .transpose()?
                 .unwrap_or_default();
+            let channel = models::selected_rfcomm_channel(&config)?;
             let frame = bmap::send_raw(
                 &config,
+                channel,
                 fblock,
                 func,
                 bmap::Operator::try_from(op)?,
@@ -335,6 +349,45 @@ pub async fn run(args: Args) -> Result<()> {
         },
     }
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum BatteryReadback {
+    Unavailable,
+    Level(u8),
+    Error(String),
+}
+
+fn status_battery_readback(
+    config: &ConfigFile,
+    read_battery: ReadBattery,
+    force_read: bool,
+) -> BatteryReadback {
+    let supports_battery = config
+        .selected_device
+        .as_ref()
+        .and_then(models::resolve_device_model)
+        .map(|model_id| models::model(model_id).capabilities().battery)
+        .unwrap_or(false);
+
+    if !supports_battery && !force_read {
+        return BatteryReadback::Unavailable;
+    }
+
+    match read_battery(config) {
+        Ok(level) => BatteryReadback::Level(level),
+        Err(err) => BatteryReadback::Error(err.to_string()),
+    }
+}
+
+fn print_status_battery(config: &ConfigFile, read_battery: ReadBattery, force_read: bool) {
+    match status_battery_readback(config, read_battery, force_read) {
+        BatteryReadback::Unavailable => {}
+        BatteryReadback::Level(level) => println!("battery: {level}%"),
+        BatteryReadback::Error(err) => {
+            eprintln!("warning: failed to read battery from headphones: {err}")
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -423,6 +476,7 @@ fn handle_mode(cmd: ModeCommand, config: &mut ConfigFile, path: &PathBuf) -> Res
             }
         }
         ModeCommand::Set { name } => {
+            models::ensure_selected_device_supports_config(config)?;
             let previous = config.clone();
             let mode = config
                 .find_mode(&name)
@@ -431,7 +485,7 @@ fn handle_mode(cmd: ModeCommand, config: &mut ConfigFile, path: &PathBuf) -> Res
             config.noise = mode.noise;
             config.immersive = mode.immersive;
             config.save(path)?;
-            sync_headphones_transaction(previous, config, path, bmap::sync_config)?;
+            sync_headphones_transaction(previous, config, path, models::sync_selected_config)?;
         }
         ModeCommand::Add {
             name,
@@ -439,6 +493,7 @@ fn handle_mode(cmd: ModeCommand, config: &mut ConfigFile, path: &PathBuf) -> Res
             noise_level,
             immersive,
         } => {
+            models::ensure_selected_device_supports_config(config)?;
             let noise = domain::NoiseControl::new(
                 noise_enabled.unwrap_or(config.noise.enabled),
                 noise_level.unwrap_or(config.noise.level),
@@ -453,6 +508,7 @@ fn handle_mode(cmd: ModeCommand, config: &mut ConfigFile, path: &PathBuf) -> Res
             println!("added mode: {}", name);
         }
         ModeCommand::Remove { name } => {
+            models::ensure_selected_device_supports_config(config)?;
             if domain::builtin_modes()
                 .iter()
                 .any(|mode| mode.name.eq_ignore_ascii_case(&name))
@@ -479,16 +535,19 @@ fn handle_mode(cmd: ModeCommand, config: &mut ConfigFile, path: &PathBuf) -> Res
 fn handle_noise(cmd: NoiseCommand, config: &mut ConfigFile, path: &PathBuf) -> Result<()> {
     match cmd {
         NoiseCommand::Set { enabled, level } => {
+            models::ensure_selected_device_supports_config(config)?;
             let previous = config.clone();
             config.noise = domain::NoiseControl::new(enabled, level)?;
             config.sync_active_mode_to_current_audio();
             config.save(path)?;
-            sync_headphones_transaction(previous, config, path, bmap::sync_config)?;
+            sync_headphones_transaction(previous, config, path, models::sync_selected_config)?;
         }
-        NoiseCommand::Show => println!(
-            "enabled={} level={}",
-            config.noise.enabled, config.noise.level
-        ),
+        NoiseCommand::Show => {
+            println!(
+                "enabled={} level={}",
+                config.noise.enabled, config.noise.level
+            )
+        }
     }
     Ok(())
 }
@@ -496,13 +555,16 @@ fn handle_noise(cmd: NoiseCommand, config: &mut ConfigFile, path: &PathBuf) -> R
 fn handle_immersive(cmd: ImmersiveCommand, config: &mut ConfigFile, path: &PathBuf) -> Result<()> {
     match cmd {
         ImmersiveCommand::Set { value } => {
+            models::ensure_selected_device_supports_config(config)?;
             let previous = config.clone();
             config.immersive = value.into();
             config.sync_active_mode_to_current_audio();
             config.save(path)?;
-            sync_headphones_transaction(previous, config, path, bmap::sync_config)?;
+            sync_headphones_transaction(previous, config, path, models::sync_selected_config)?;
         }
-        ImmersiveCommand::Show => println!("{}", config.immersive),
+        ImmersiveCommand::Show => {
+            println!("{}", config.immersive)
+        }
     }
     Ok(())
 }
@@ -510,15 +572,18 @@ fn handle_immersive(cmd: ImmersiveCommand, config: &mut ConfigFile, path: &PathB
 fn handle_eq(cmd: EqCommand, config: &mut ConfigFile, path: &PathBuf) -> Result<()> {
     match cmd {
         EqCommand::Set { bass, mid, treble } => {
+            models::ensure_selected_device_supports_config(config)?;
             let previous = config.clone();
             config.eq = domain::Eq::new(bass, mid, treble)?;
             config.save(path)?;
-            sync_headphones_transaction(previous, config, path, bmap::sync_config)?;
+            sync_headphones_transaction(previous, config, path, models::sync_selected_config)?;
         }
-        EqCommand::Show => println!(
-            "bass={} mid={} treble={}",
-            config.eq.bass, config.eq.mid, config.eq.treble
-        ),
+        EqCommand::Show => {
+            println!(
+                "bass={} mid={} treble={}",
+                config.eq.bass, config.eq.mid, config.eq.treble
+            )
+        }
     }
     Ok(())
 }
@@ -542,6 +607,72 @@ mod tests {
         TRANSACTION_SYNC_CALLS.store(0, Ordering::SeqCst);
     }
 
+    fn read_battery_88(_: &ConfigFile) -> Result<u8> {
+        Ok(88)
+    }
+
+    fn fail_read_battery(_: &ConfigFile) -> Result<u8> {
+        anyhow::bail!("rfcomm failed")
+    }
+
+    fn panic_read_battery(_: &ConfigFile) -> Result<u8> {
+        panic!("battery reader should not be called")
+    }
+
+    fn selected_device_config(name: &str, model: domain::ModelId) -> ConfigFile {
+        let mut config = ConfigFile::default();
+        config.selected_device = Some(domain::DeviceRef {
+            address: "AA:BB".into(),
+            name: Some(name.into()),
+            model: Some(model),
+        });
+        config
+    }
+
+    #[test]
+    fn status_reads_battery_for_supported_selected_model() {
+        let config =
+            selected_device_config("Bose QC Ultra 2 HP", domain::ModelId::QcUltraHeadphones2);
+
+        assert_eq!(
+            status_battery_readback(&config, read_battery_88, false),
+            BatteryReadback::Level(88)
+        );
+    }
+
+    #[test]
+    fn status_skips_battery_for_unsupported_selected_model() {
+        let config =
+            selected_device_config("Bose QuietComfort 45", domain::ModelId::QuietComfort45);
+
+        assert_eq!(
+            status_battery_readback(&config, panic_read_battery, false),
+            BatteryReadback::Unavailable
+        );
+    }
+
+    #[test]
+    fn status_reports_supported_battery_read_errors() {
+        let config =
+            selected_device_config("Bose QC Ultra 2 HP", domain::ModelId::QcUltraHeadphones2);
+
+        assert_eq!(
+            status_battery_readback(&config, fail_read_battery, false),
+            BatteryReadback::Error("rfcomm failed".into())
+        );
+    }
+
+    #[test]
+    fn status_headphones_flag_forces_legacy_battery_readback() {
+        let config =
+            selected_device_config("Bose QuietComfort 45", domain::ModelId::QuietComfort45);
+
+        assert_eq!(
+            status_battery_readback(&config, read_battery_88, true),
+            BatteryReadback::Level(88)
+        );
+    }
+
     #[test]
     fn sync_transaction_rolls_back_config_after_sync_failure() {
         reset_transaction_sync_calls();
@@ -551,6 +682,7 @@ mod tests {
         previous.selected_device = Some(domain::DeviceRef {
             address: "AA:BB".into(),
             name: Some("Headphones".into()),
+            model: Some(domain::ModelId::QcUltraHeadphones2),
         });
         previous.save(&path).unwrap();
 
@@ -568,6 +700,34 @@ mod tests {
         assert_eq!(config.active_mode.as_deref(), Some("Quiet"));
         assert_eq!(config.noise.level, 10);
         assert_eq!(saved.active_mode.as_deref(), Some("Quiet"));
+        assert_eq!(saved.noise.level, 10);
+    }
+
+    #[test]
+    fn unsupported_selected_model_rejects_qc_ultra_2_config_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bose.toml");
+        let mut config = ConfigFile::default();
+        config.selected_device = Some(domain::DeviceRef {
+            address: "AA:BB".into(),
+            name: Some("Bose QuietComfort 45".into()),
+            model: Some(domain::ModelId::QuietComfort45),
+        });
+        config.save(&path).unwrap();
+
+        let err = handle_noise(
+            NoiseCommand::Set {
+                enabled: true,
+                level: 5,
+            },
+            &mut config,
+            &path,
+        )
+        .unwrap_err();
+
+        let saved = ConfigFile::load_or_default(&path).unwrap();
+        assert!(err.to_string().contains("does not support"));
+        assert_eq!(config.noise.level, 10);
         assert_eq!(saved.noise.level, 10);
     }
 }

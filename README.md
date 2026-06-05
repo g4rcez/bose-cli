@@ -3,9 +3,10 @@
 `bose-cli` is a terminal tool for discovering and controlling supported Bose
 headphones without opening the Bose app.
 
-It currently targets **Bose QuietComfort Ultra Headphones (2nd Gen)**, also seen
-on macOS as `Bose QC Ultra 2 HP`. The CLI can save desired headphone settings in
-`$HOME/.config/bosecli/config.toml` and sync supported settings to the headset over Bluetooth.
+The only model with verified configuration writes today is **Bose QuietComfort
+Ultra Headphones (2nd Gen)**, also seen on macOS as `Bose QC Ultra 2 HP`. The CLI
+can detect other known Bose models, but it refuses mode/noise/immersive/EQ writes
+unless the selected model has an implemented profile.
 
 ## Context
 
@@ -20,19 +21,27 @@ The project started as a small CLI/TUI replacement for common Bose app actions:
 
 Bluetooth device discovery uses BLE/macOS Bluetooth listing, but configuration
 writes use **BMAP over Bluetooth Classic RFCOMM**. The BMAP/RFCOMM protocol work
-is inspired by [`aaronsb/bosectl`](https://github.com/aaronsb/bosectl). Detailed
-protocol notes are in [`PROTOCOL.md`](PROTOCOL.md).
+is inspired by `aaronsb/bosectl`. Detailed protocol notes are in `PROTOCOL.md`.
 
 ## Supported features
 
-Current sync support:
+Current sync support for `qc-ultra-headphones-2`:
 
 - built-in modes: `Quiet`, `Aware`, `Immersion`, `Cinema`
 - noise control: enabled/disabled plus level `0..10`
 - immersive audio: `off`, `still`, `motion`
 - EQ: bass/mid/treble, each `-10..10`
-- battery readback with `status --headphones`
+- battery readback in `status` for supported selected headphones
 - interactive TUI for selecting a device and changing modes/noise/immersive
+
+Recognized but not writable yet:
+
+- `qc-ultra-headphones`
+- `quietcomfort-headphones`
+- `quietcomfort-45`
+- `noise-cancelling-headphones-700`
+- `quietcomfort-ultra-earbuds`
+- `quietcomfort-earbuds-2`
 
 Not implemented yet:
 
@@ -50,10 +59,9 @@ Why:
 - The headset control path is RFCOMM/SPP, not BLE.
 - macOS CoreBluetooth is BLE-only.
 - The project uses an `IOBluetooth` Objective-C bridge in `src/macos_rfcomm.m`
-  to open RFCOMM channel `2` and exchange BMAP packets.
+  to open the model profile’s RFCOMM channel and exchange BMAP packets.
 
-Bluetooth discovery can still use `btleplug`, but syncing settings requires the
-macOS RFCOMM bridge today.
+Bluetooth discovery can still use `btleplug`, but syncing settings requires themacOS RFCOMM bridge today.
 
 ## Requirements
 
@@ -61,7 +69,7 @@ macOS RFCOMM bridge today.
 - macOS with Command Line Tools installed (`xcode-select --install`)
 - Bluetooth enabled
 - the Bose headset paired with macOS
-- optional: [`fzf`](https://github.com/junegunn/fzf) for `bose devices --select`
+- optional: `fzf` for `bose devices --select`
 
 ## Build and compile
 
@@ -135,6 +143,7 @@ immersive = "Off"
 [selected_device]
 address = "68:F2:1F:0D:FE:42"
 name = "Bose QC Ultra 2 HP"
+model = "qc-ultra-headphones-2"
 
 [noise]
 enabled = true
@@ -184,18 +193,17 @@ Select a device with `fzf` and save it to config:
 bose devices --select
 ```
 
+Device rows include the inferred model ID when one is recognized. Unknown models
+can still be selected, but hardware writes are refused until a model profile is
+implemented.
+
 ### Show status
 
-Show desired local state from `config.toml`:
+Show desired local state from `config.toml` and, when the selected model supports
+it, live battery percentage:
 
 ```sh
 bose status
-```
-
-Also read battery from the headphones:
-
-```sh
-bose status --headphones
 ```
 
 ### Sync saved config to headphones
@@ -204,14 +212,9 @@ bose status --headphones
 bose sync
 ```
 
-This pushes the saved mode/noise/immersive/EQ state to the selected headset.
+This pushes the saved mode/noise/immersive/EQ state to the selected headset ifits model supports the current configuration profile.
 
-When a selected headset is available, setting changes use a best-effort
-transaction: the CLI snapshots the previous desired config in memory, saves the
-requested change, and attempts headset sync. If sync fails, it restores the
-previous config on disk and attempts to sync those previous desired settings back
-to the headset. The headset state can still be unknown if rollback sync also
-fails. Without a selected headset, changes are saved locally only.
+When a supported selected headset is available, setting changes use a best-efforttransaction: the CLI snapshots the previous desired config in memory, saves therequested change, and attempts headset sync. If sync fails, it restores theprevious config on disk and attempts to sync those previous desired settings backto the headset. The headset state can still be unknown if rollback sync alsofails. Without a selected headset, changes are saved locally only. With aselected unsupported or unknown model, the CLI rejects these configurationcommands before saving.
 
 ### Modes
 
@@ -318,9 +321,9 @@ Controls:
 - `Esc`/`Backspace`: go back
 - `q` or `Ctrl-C`: quit
 
-The TUI saves changes and syncs supported mode/noise/immersive changes to the
-selected headset. If sync fails, it rolls the local config and UI controls back to
-the previous desired settings and attempts a best-effort headset rollback.
+The TUI saves changes and syncs supported mode/noise/immersive changes to theselected headset. If sync fails, it rolls the local config and UI controls back tothe previous desired settings and attempts a best-effort headset rollback.
+
+While a save/sync action is running, the footer shows a busy status and listscreens replace the selection marker with a spinner.
 
 ## Development notes
 
@@ -369,8 +372,7 @@ If sync fails:
 
 1. Confirm the headset is paired and connected in macOS Bluetooth settings.
 2. Confirm the selected device in `config.toml` has the correct Bluetooth address.
-3. Run `bose status --headphones` to verify RFCOMM/BMAP readback.
+3. Run `bose status` to verify RFCOMM/BMAP readback.
 4. Run `bose sync` again after reconnecting the headset.
 
-If `devices --select` fails, install `fzf` or select/configure the device
-manually in `config.toml`.
+If `devices --select` fails, install `fzf` or select/configure the devicemanually in `config.toml`.

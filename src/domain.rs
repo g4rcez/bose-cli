@@ -2,10 +2,45 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelId {
+    #[serde(rename = "qc-ultra-headphones-2", alias = "qc-ultra-headphones2")]
+    QcUltraHeadphones2,
+    #[serde(rename = "qc-ultra-headphones")]
+    QcUltraHeadphones,
+    #[serde(rename = "quietcomfort-headphones")]
+    QuietComfortHeadphones,
+    #[serde(rename = "quietcomfort-45")]
+    QuietComfort45,
+    #[serde(rename = "noise-cancelling-headphones-700")]
+    NoiseCancellingHeadphones700,
+    #[serde(rename = "quietcomfort-ultra-earbuds")]
+    QuietComfortUltraEarbuds,
+    #[serde(rename = "quietcomfort-earbuds-2", alias = "quietcomfort-earbuds2")]
+    QuietComfortEarbuds2,
+}
+
+impl fmt::Display for ModelId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::QcUltraHeadphones2 => "qc-ultra-headphones-2",
+            Self::QcUltraHeadphones => "qc-ultra-headphones",
+            Self::QuietComfortHeadphones => "quietcomfort-headphones",
+            Self::QuietComfort45 => "quietcomfort-45",
+            Self::NoiseCancellingHeadphones700 => "noise-cancelling-headphones-700",
+            Self::QuietComfortUltraEarbuds => "quietcomfort-ultra-earbuds",
+            Self::QuietComfortEarbuds2 => "quietcomfort-earbuds-2",
+        };
+        write!(f, "{value}")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceRef {
     pub address: String,
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelId>,
 }
 impl DeviceRef {
     pub fn display(&self) -> String {

@@ -1,6 +1,7 @@
 use bose_cli::{
     config::{ConfigFile, MAX_CUSTOM_MODES},
-    domain::{ImmersiveAudio, ModePreset, NoiseControl},
+    domain::{ImmersiveAudio, ModePreset, ModelId, NoiseControl},
+    models,
 };
 
 #[test]
@@ -61,6 +62,43 @@ treble = 0
     .unwrap();
 
     assert!(ConfigFile::load_or_default(&path).is_err());
+}
+
+#[test]
+fn old_selected_device_without_model_still_resolves_from_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bose.toml");
+    std::fs::write(
+        &path,
+        r#"
+active_mode = "Quiet"
+custom_modes = []
+immersive = "Off"
+
+[selected_device]
+address = "68:F2:1F:0D:FE:42"
+name = "Bose QC Ultra 2 HP"
+
+[noise]
+enabled = true
+level = 10
+
+[eq]
+bass = 0
+mid = 0
+treble = 0
+"#,
+    )
+    .unwrap();
+
+    let config = ConfigFile::load_or_default(&path).unwrap();
+    let device = config.selected_device.as_ref().unwrap();
+
+    assert_eq!(device.model, None);
+    assert_eq!(
+        models::resolve_device_model(device),
+        Some(ModelId::QcUltraHeadphones2)
+    );
 }
 
 #[test]

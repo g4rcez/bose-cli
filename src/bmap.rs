@@ -1,7 +1,6 @@
-use crate::{config::ConfigFile, domain::ImmersiveAudio};
+use crate::config::ConfigFile;
 use anyhow::{bail, Context, Result};
 
-const QC_ULTRA_2_RFCOMM_CHANNEL: u8 = 2;
 const RFCOMM_TIMEOUT_MS: u32 = 8_000;
 
 #[cfg(target_os = "macos")]
@@ -102,9 +101,17 @@ pub fn parse_frames(bytes: &[u8]) -> Result<Vec<Frame>> {
     Ok(frames)
 }
 
-fn send(address: &str, fblock: u8, func: u8, op: Operator, payload: &[u8]) -> Result<Frame> {
+pub(crate) fn send(
+    address: &str,
+    channel: u8,
+    fblock: u8,
+    func: u8,
+    op: Operator,
+    payload: &[u8],
+) -> Result<Frame> {
     send_expect(
         address,
+        channel,
         fblock,
         func,
         op,
@@ -115,6 +122,7 @@ fn send(address: &str, fblock: u8, func: u8, op: Operator, payload: &[u8]) -> Re
 
 fn send_expect(
     address: &str,
+    channel: u8,
     fblock: u8,
     func: u8,
     op: Operator,
@@ -122,7 +130,7 @@ fn send_expect(
     expected_ops: &[Operator],
 ) -> Result<Frame> {
     let frame = build_frame(fblock, func, op, payload)?;
-    let response = transact(address, &frame)?;
+    let response = transact(address, channel, &frame)?;
     let frames = parse_frames(&response)?;
 
     let mut saw_matching_address = None;
@@ -151,6 +159,7 @@ fn send_expect(
 
 pub fn send_raw(
     config: &ConfigFile,
+    channel: u8,
     fblock: u8,
     func: u8,
     op: Operator,
@@ -161,7 +170,7 @@ pub fn send_raw(
         .as_ref()
         .context("no selected device")?;
     let frame = build_frame(fblock, func, op, payload)?;
-    let response = transact(&device.address, &frame)?;
+    let response = transact(&device.address, channel, &frame)?;
     parse_frames(&response)?
         .into_iter()
         .next()
@@ -169,7 +178,7 @@ pub fn send_raw(
 }
 
 #[cfg(target_os = "macos")]
-fn transact(address: &str, frame: &[u8]) -> Result<Vec<u8>> {
+fn transact(address: &str, channel: u8, frame: &[u8]) -> Result<Vec<u8>> {
     let address = std::ffi::CString::new(address).context("Bluetooth address contains NUL")?;
     let request_len = u16::try_from(frame.len()).context("BMAP frame too large")?;
     let mut response = vec![0u8; 4096];
@@ -179,7 +188,7 @@ fn transact(address: &str, frame: &[u8]) -> Result<Vec<u8>> {
     let status = unsafe {
         bose_rfcomm_send_recv(
             address.as_ptr(),
-            QC_ULTRA_2_RFCOMM_CHANNEL,
+            channel,
             frame.as_ptr(),
             request_len,
             response.as_mut_ptr(),
@@ -203,7 +212,7 @@ fn transact(address: &str, frame: &[u8]) -> Result<Vec<u8>> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn transact(_address: &str, _frame: &[u8]) -> Result<Vec<u8>> {
+fn transact(_address: &str, _channel: u8, _frame: &[u8]) -> Result<Vec<u8>> {
     bail!("headphone sync is only supported on macOS")
 }
 
@@ -240,95 +249,9 @@ fn error_name(code: u8) -> &'static str {
     }
 }
 
-fn mode_index(name: &str) -> Option<u8> {
-    match name.to_ascii_lowercase().as_str() {
-        "quiet" => Some(0),
-        "aware" => Some(1),
-        "immersion" => Some(2),
-        "cinema" => Some(3),
-        _ => None,
-    }
-}
-
-fn immersive_to_spatial(value: &ImmersiveAudio) -> u8 {
-    match value {
-        ImmersiveAudio::Off => 0,
-        ImmersiveAudio::Still => 1,
-        ImmersiveAudio::Motion => 2,
-    }
-}
-
-fn eq_payload(value: i8, band_id: u8) -> [u8; 2] {
-    [value as u8, band_id]
-}
-
-fn audio_payload(config: &ConfigFile) -> [u8; 5] {
-    [
-        10 - config.noise.level,
-        0,
-        immersive_to_spatial(&config.immersive),
-        0,
-        if config.noise.enabled { 1 } else { 0 },
-    ]
-}
-
-pub fn sync_config(config: &ConfigFile) -> Result<()> {
-    let device = config
-        .selected_device
-        .as_ref()
-        .context("no selected device")?;
-    let address = &device.address;
-
-    if let Some(active) = &config.active_mode {
-        let index = mode_index(active).with_context(|| {
-            format!(
-                "headphone sync only supports built-in modes Quiet, Aware, Immersion, and Cinema; custom mode '{active}' was saved locally only"
-            )
-        })?;
-        let payload = [index, 0];
-        let _ = send(address, 31, 3, Operator::Start, &payload).context("switch audio mode")?;
-        std::thread::sleep(std::time::Duration::from_millis(750));
-    }
-
-    let _ = send(address, 31, 10, Operator::SetGet, &audio_payload(config))
-        .context("set noise/immersive audio settings")?;
-    std::thread::sleep(std::time::Duration::from_millis(250));
-    for (band_id, value) in [
-        (0, config.eq.bass),
-        (1, config.eq.mid),
-        (2, config.eq.treble),
-    ] {
-        let _ = send(address, 1, 7, Operator::SetGet, &eq_payload(value, band_id))
-            .with_context(|| format!("set EQ band {band_id}"))?;
-        std::thread::sleep(std::time::Duration::from_millis(250));
-    }
-    Ok(())
-}
-
-pub fn read_battery(config: &ConfigFile) -> Result<u8> {
-    let device = config
-        .selected_device
-        .as_ref()
-        .context("no selected device")?;
-    let frame = send(&device.address, 2, 2, Operator::Get, &[])?;
-    if frame.fblock != 2 || frame.func != 2 {
-        bail!(
-            "unexpected battery response [{}.{}]",
-            frame.fblock,
-            frame.func
-        );
-    }
-    frame
-        .payload
-        .first()
-        .copied()
-        .context("battery response missing payload")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{DeviceRef, Eq, NoiseControl};
 
     #[test]
     fn builds_and_parses_frame() {
@@ -356,30 +279,6 @@ mod tests {
     fn rejects_oversized_payload() {
         let payload = vec![0; 256];
         assert!(build_frame(1, 1, Operator::Set, &payload).is_err());
-    }
-
-    #[test]
-    fn maps_audio_and_eq_payloads() {
-        let config = ConfigFile {
-            selected_device: Some(DeviceRef {
-                address: "68:F2".into(),
-                name: Some("Bose QC Ultra 2 HP".into()),
-            }),
-            active_mode: Some("Quiet".into()),
-            custom_modes: vec![],
-            noise: NoiseControl {
-                enabled: true,
-                level: 7,
-            },
-            immersive: ImmersiveAudio::Motion,
-            eq: Eq {
-                bass: -10,
-                mid: 0,
-                treble: 10,
-            },
-        };
-        assert_eq!(audio_payload(&config), [3, 0, 2, 0, 1]);
-        assert_eq!(eq_payload(-10, 0), [246, 0]);
     }
 
     #[test]

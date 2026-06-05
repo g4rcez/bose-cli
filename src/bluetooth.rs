@@ -1,3 +1,4 @@
+use crate::{domain::ModelId, models};
 #[cfg(target_os = "macos")]
 use anyhow::Context;
 use anyhow::{bail, Result};
@@ -16,6 +17,7 @@ const PLATFORM_DEVICE_LIST_TIMEOUT: Duration = Duration::from_secs(3);
 pub struct ScannedDevice {
     pub name: Option<String>,
     pub address: String,
+    pub model: Option<ModelId>,
     pub rssi: Option<i16>,
     pub connected: bool,
 }
@@ -73,11 +75,13 @@ pub async fn scan_devices(seconds: u64) -> Result<Vec<ScannedDevice>> {
         for peripheral in peripherals {
             let address = peripheral.address().to_string();
             let props = peripheral.properties().await.ok().flatten();
+            let name = props.as_ref().and_then(|props| props.local_name.clone());
             let connected = peripheral.is_connected().await.unwrap_or(false);
             upsert_device(
                 &mut devices,
                 ScannedDevice {
-                    name: props.as_ref().and_then(|props| props.local_name.clone()),
+                    model: name.as_deref().and_then(models::infer_model_from_name),
+                    name,
                     address,
                     rssi: props.as_ref().and_then(|props| props.rssi),
                     connected,
@@ -101,6 +105,7 @@ fn upsert_device(devices: &mut BTreeMap<String, ScannedDevice>, device: ScannedD
         Entry::Occupied(mut slot) => {
             let ScannedDevice {
                 name,
+                model,
                 rssi,
                 connected,
                 ..
@@ -109,6 +114,9 @@ fn upsert_device(devices: &mut BTreeMap<String, ScannedDevice>, device: ScannedD
 
             if name.is_some() && (existing.name.is_none() || connected) {
                 existing.name = name;
+            }
+            if model.is_some() && (existing.model.is_none() || connected) {
+                existing.model = model;
             }
             if rssi.is_some() {
                 existing.rssi = rssi;
@@ -188,8 +196,10 @@ fn parse_macos_known_devices(value: &serde_json::Value) -> Vec<ScannedDevice> {
                         continue;
                     };
 
+                    let name = name.clone();
                     devices.push(ScannedDevice {
-                        name: Some(name.clone()),
+                        model: models::infer_model_from_name(&name),
+                        name: Some(name),
                         address: address.to_string(),
                         rssi: parse_macos_device_rssi(props),
                         connected,
@@ -244,6 +254,7 @@ mod tests {
         assert_eq!(devices.len(), 2);
         assert_eq!(devices[0].name.as_deref(), Some("Bose QC Ultra 2 HP"));
         assert_eq!(devices[0].address, "68:F2:1F:0D:FE:42");
+        assert_eq!(devices[0].model, Some(ModelId::QcUltraHeadphones2));
         assert_eq!(devices[0].rssi, Some(-42));
         assert!(devices[0].connected);
         assert_eq!(devices[1].name.as_deref(), Some("WH-1000XM3"));
@@ -259,6 +270,7 @@ mod tests {
             ScannedDevice {
                 name: None,
                 address: "68:F2:1F:0D:FE:42".into(),
+                model: None,
                 rssi: None,
                 connected: false,
             },
@@ -268,6 +280,7 @@ mod tests {
             ScannedDevice {
                 name: Some("Bose QC Ultra 2 HP".into()),
                 address: "68:F2:1F:0D:FE:42".into(),
+                model: Some(ModelId::QcUltraHeadphones2),
                 rssi: Some(-42),
                 connected: true,
             },
@@ -275,6 +288,7 @@ mod tests {
 
         let device = devices.values().next().unwrap();
         assert_eq!(device.name.as_deref(), Some("Bose QC Ultra 2 HP"));
+        assert_eq!(device.model, Some(ModelId::QcUltraHeadphones2));
         assert_eq!(device.rssi, Some(-42));
         assert!(device.connected);
     }
@@ -287,6 +301,7 @@ mod tests {
             ScannedDevice {
                 name: Some("lower".into()),
                 address: "68:f2:1f:0d:fe:42".into(),
+                model: None,
                 rssi: None,
                 connected: false,
             },
@@ -296,6 +311,7 @@ mod tests {
             ScannedDevice {
                 name: Some("Bose QC Ultra 2 HP".into()),
                 address: "68-F2-1F-0D-FE-42".into(),
+                model: Some(ModelId::QcUltraHeadphones2),
                 rssi: None,
                 connected: true,
             },
