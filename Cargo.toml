@@ -1,0 +1,26 @@
+[package]
+name = "bose-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Control your Bose devices through CLI/TUI"
+
+[[bin]]
+name = "bose"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+btleplug = "0.11"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+ratatui = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "process", "rt-multi-thread", "time"] }
+toml = "0.8"
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+tempfile = "3"
